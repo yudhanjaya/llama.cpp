@@ -1,3 +1,62 @@
+# SenseNova Loop: fused mHC Sinkhorn (fork of OpenSenseNova/llama.cpp)
+
+This fork is [OpenSenseNova/llama.cpp](https://github.com/OpenSenseNova/llama.cpp) at `24ea7bb` with one commit that
+makes [SenseNova-Loop-9B](https://huggingface.co/sensenova/SenseNova-Loop-9B-GGUF) decode about 3.7x faster on CUDA,
+with the same output. Everything below the line is the upstream README, unchanged.
+
+## What was slow
+
+SenseNova Loop runs its 32 layers looped to 56. At each layer, mHC (manifold-constrained hyper-connections) mixes two
+residual streams through a 2x2 matrix that 20 iterations of log-domain Sinkhorn make doubly stochastic. Upstream
+builds every iteration out of ordinary ggml ops, so one decode step was about 53,000 graph nodes, nearly all of them
+tiny kernel launches on a handful of floats. The router matmul also asks for FP32 precision, which the CUDA backend
+refused on Ampere and newer (its cuBLAS path uses TF32), so the router ran on the CPU every layer.
+
+## What this fork changes
+
+1. **A fused op, `GGML_OP_MHC_SINKHORN2`** (`ggml_mhc_sinkhorn2(ctx, a, offset, n_iter)`), with a CPU implementation
+   and a CUDA kernel (`ggml/src/ggml-cuda/mhc-sinkhorn.cu`) that keeps all 20 iterations in registers, one thread per
+   column. It computes exactly what the original graph computes: per column, the pairs (0,1), (2,3), (0,2), (1,3)
+   normalised in the log domain with `d = x - y; x = -softplus(-d); y = -softplus(d)`, repeated, then `exp`.
+2. **The FP32 router stays on the GPU.** `supports_op` in `ggml-cuda.cu` now accepts an FP32-precision `MUL_MAT`
+   when the true-FP32 vector kernel (mmvf) handles it, instead of sending it to the CPU.
+3. **`src/models/sensenova-loop.cpp`** uses the fused op in `build_route`.
+4. **`tests/test-mhc-sinkhorn2.cpp`** checks the fused op against the original unfused graph on CPU and CUDA.
+
+## Results
+
+RTX 3080 10 GB (PCIe 3.0 x4), SenseNova-Loop-9B Q5_K_M, CUDA 13.0, greedy:
+
+| | Decode | Graph nodes per decode step |
+| --- | ---: | ---: |
+| Upstream `24ea7bb` | 12.1 tokens/s | ~53,000 |
+| This fork | **44.5 tokens/s** | ~7,000 |
+
+Accuracy (`llama-perplexity --kl-divergence`): the fused op matches the unfused graph exactly (KLD 0); the router on
+the GPU against the router on the CPU differs by summation order only (mean KLD 0.0014, max 0.053). A closed-form 2x2
+solution was tried and dropped (KLD 0.056). At 128K context with a 4-bit KV cache the model still finds a needle at
+106K tokens.
+
+## Runtime switches (environment variables, not CMake options)
+
+| Variable | Effect |
+| --- | --- |
+| `SENSENOVA_MHC_UNFUSED=1` | build the original unfused Sinkhorn graph, for A/B checks |
+| `SENSENOVA_MHC_GPU_ROUTER=1` | do not request FP32 precision for the router matmul |
+| `GGML_CUDA_F32_PREC_MMVF=0` | restore the old CUDA rule (FP32-precision matmuls go to the CPU) |
+
+None of them is needed: by default you get the fused op and the GPU router.
+
+## Build
+
+As upstream: `cmake -B build -DGGML_CUDA=ON && cmake --build build -j`. Build against one CUDA toolkit only: nvcc 13
+headers linked with an older libcudart (for example Ubuntu's CUDA 12 package) break MoE models with "invalid
+argument" in `ggml_cuda_mul_mat_q`; pass `-DCUDAToolkit_ROOT=` for the toolkit your nvcc belongs to.
+
+Full list of changed files and the test's build command: [SENSENOVA-MHC-FUSED.md](SENSENOVA-MHC-FUSED.md).
+
+---
+
 # llama.cpp
 
 ![llama.cpp](https://raw.githubusercontent.com/ggml-org/llama-brand/refs/heads/master/logo/svg/cover/llama-cpp/cover-llama-cpp-dark.svg)

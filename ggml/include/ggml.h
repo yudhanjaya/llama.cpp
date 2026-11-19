@@ -429,6 +429,8 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_MHC_SINKHORN2,
+
         GGML_OP_COUNT,
     };
 
@@ -1101,6 +1103,15 @@ extern "C" {
             float alpha_p,
             float beta,
             float eps);
+
+    // 2x2 log-domain Sinkhorn mix (SenseNova mHC): per column of a, reads a[offset .. offset+3] as logits
+    // m0..m3, runs n_iter rounds of pairwise log-normalization (m0,m1) (m2,m3) (m0,m2) (m1,m3), returns exp(m)
+    // as a [4, a->ne[1], a->ne[2], a->ne[3]] F32 tensor. Same arithmetic as the sub/neg/softplus graph it replaces.
+    GGML_API struct ggml_tensor * ggml_mhc_sinkhorn2(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   offset,
+            int                   n_iter);
 
     // gated linear unit ops
     // A: n columns, r rows,

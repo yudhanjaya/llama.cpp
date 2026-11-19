@@ -1,7 +1,18 @@
 #include "models.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
+
+// Local switches (not upstream), read once:
+//   SENSENOVA_MHC_UNFUSED=1     build the 2x2 Sinkhorn mix as the original sub/neg/softplus graph (six ops per
+//                               pair and round, ~46K nodes per token) instead of the fused ggml_mhc_sinkhorn2 op
+//   SENSENOVA_MHC_GPU_ROUTER=1  do not request FP32 precision for the router matmul's activations, so the CUDA
+//                               backend keeps it on the GPU on Ampere and newer (accumulation stays FP32)
+static bool sensenova_env(const char * name) {
+    const char * v = std::getenv(name);
+    return v != nullptr && v[0] == '1';
+}
 
 void llama_model_sensenova_loop::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key_or_arr(LLM_KV_ATTENTION_RECURRENT_LAYERS, hparams.is_recr_impl, hparams.n_layer_all, true);
@@ -107,9 +118,13 @@ llama_model_sensenova_loop::graph::routing llama_model_sensenova_loop::graph::bu
     ggml_tensor * flat = ggml_concat(ctx0, a, b, 0);
     flat = ggml_rms_norm(ctx0, flat, 1e-6f);
     ggml_tensor * logits = build_lora_mm(weight, flat);
+    static const bool gpu_router = sensenova_env("SENSENOVA_MHC_GPU_ROUTER");
+    static const bool unfused    = sensenova_env("SENSENOVA_MHC_UNFUSED");
     if (logits->op == GGML_OP_MUL_MAT) {
         ggml_prec_set_acc(logits, GGML_PREC_F32);
-        ggml_prec_set_src(logits, GGML_PREC_F32, 1);
+        if (!gpu_router) {
+            ggml_prec_set_src(logits, GGML_PREC_F32, 1);
+        }
     }
     logits = ggml_add(ctx0, logits, bias);
     auto row = [&](int i) {
@@ -121,7 +136,13 @@ llama_model_sensenova_loop::graph::routing llama_model_sensenova_loop::graph::bu
     result.input = ggml_scale(ctx0, result.input, hparams.mhc_pre_scale);
     result.post[0] = ggml_scale(ctx0, ggml_sigmoid(ctx0, row(2)), 2.0f);
     result.post[1] = ggml_scale(ctx0, ggml_sigmoid(ctx0, row(3)), 2.0f);
-    if (!hparams.mhc_fixed_identity) {
+    if (!hparams.mhc_fixed_identity && !unfused) {
+        // all mhc_iterations rounds and the final exp in one op; mix[i] views row i of its [4, n_tokens] result
+        ggml_tensor * mix = ggml_mhc_sinkhorn2(ctx0, logits, 4, (int) hparams.mhc_iterations);
+        for (int i = 0; i < 4; ++i) {
+            result.mix[i] = ggml_view_2d(ctx0, mix, 1, a->ne[1], mix->nb[1], i*mix->nb[0]);
+        }
+    } else if (!hparams.mhc_fixed_identity) {
         for (int i = 0; i < 4; ++i) {
             result.mix[i] = row(4 + i);
         }

@@ -1112,9 +1112,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+
+    "MHC_SINKHORN2",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1225,9 +1227,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+
+    "mhc_sinkhorn2(x)",
 };
 
-static_assert(GGML_OP_COUNT == 99, "GGML_OP_COUNT != 99");
+static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -2888,6 +2892,28 @@ struct ggml_tensor * ggml_exp_inplace(
         struct ggml_context * ctx,
         struct ggml_tensor  * a) {
     return ggml_unary_inplace(ctx, a, GGML_UNARY_OP_EXP);
+}
+
+// ggml_mhc_sinkhorn2
+
+struct ggml_tensor * ggml_mhc_sinkhorn2(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   offset,
+        int                   n_iter) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(offset >= 0 && offset + 4 <= a->ne[0]);
+    GGML_ASSERT(n_iter >= 0);
+
+    struct ggml_tensor * result = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 4, a->ne[1], a->ne[2], a->ne[3]);
+
+    int32_t params[] = { offset, n_iter };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_MHC_SINKHORN2;
+    result->src[0] = a;
+
+    return result;
 }
 
 // ggml_glu

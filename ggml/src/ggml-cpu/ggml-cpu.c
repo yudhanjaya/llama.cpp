@@ -2069,6 +2069,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_glu(params, tensor);
             } break;
+        case GGML_OP_MHC_SINKHORN2:
+            {
+                ggml_compute_forward_mhc_sinkhorn2(params, tensor);
+            } break;
         case GGML_OP_GET_REL_POS:
             {
                 ggml_compute_forward_get_rel_pos(params, tensor);
@@ -2344,6 +2348,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                     GGML_ABORT("fatal error");
             }
             break;
+        case GGML_OP_MHC_SINKHORN2:
+            {
+                n_tasks = n_threads;
+            } break;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(node)) {
                 case GGML_GLU_OP_REGLU:

@@ -10392,6 +10392,58 @@ void ggml_compute_forward_unary(
     }
 }
 
+// ggml_compute_forward_mhc_sinkhorn2
+
+static inline float mhc_softplus(float x) {
+    return (x > 20.0f) ? x : log1pf(expf(x)); // same as the unary SOFTPLUS op
+}
+
+// two-element log-normalization, written as the graph it replaces: d = x - y; x = -softplus(-d); y = -softplus(d)
+static inline void mhc_normalize(float & x, float & y) {
+    const float d = x - y;
+    x = -mhc_softplus(-d);
+    y = -mhc_softplus(d);
+}
+
+void ggml_compute_forward_mhc_sinkhorn2(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+
+    const int32_t offset = ggml_get_op_params_i32(dst, 0);
+    const int32_t n_iter = ggml_get_op_params_i32(dst, 1);
+
+    const int64_t n_cols = ggml_nrows(dst);
+    const int64_t dr     = (n_cols + params->nth - 1) / params->nth;
+    const int64_t ir0    = dr * params->ith;
+    const int64_t ir1    = MIN(ir0 + dr, n_cols);
+
+    for (int64_t ir = ir0; ir < ir1; ++ir) {
+        const int64_t i3 = ir / (src0->ne[2] * src0->ne[1]);
+        const int64_t i2 = (ir - i3 * src0->ne[2] * src0->ne[1]) / src0->ne[1];
+        const int64_t i1 = ir - i3 * src0->ne[2] * src0->ne[1] - i2 * src0->ne[1];
+
+        const char * s = (const char *) src0->data + i1 * src0->nb[1] + i2 * src0->nb[2] + i3 * src0->nb[3];
+        float * d = (float *) ((char *) dst->data + i1 * dst->nb[1] + i2 * dst->nb[2] + i3 * dst->nb[3]);
+
+        float m[4];
+        for (int k = 0; k < 4; ++k) {
+            m[k] = *(const float *) (s + (offset + k) * src0->nb[0]);
+        }
+        for (int32_t it = 0; it < n_iter; ++it) {
+            mhc_normalize(m[0], m[1]);
+            mhc_normalize(m[2], m[3]);
+            mhc_normalize(m[0], m[2]);
+            mhc_normalize(m[1], m[3]);
+        }
+        for (int k = 0; k < 4; ++k) {
+            *(float *) ((char *) d + k * dst->nb[0]) = expf(m[k]);
+        }
+    }
+}
+
 //ggml_compute_forward_glu
 
 void ggml_compute_forward_glu(

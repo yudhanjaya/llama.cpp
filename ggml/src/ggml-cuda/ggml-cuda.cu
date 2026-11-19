@@ -74,6 +74,7 @@
 #include "ggml-cuda/fill.cuh"
 #include "ggml-cuda/lightning-indexer.cuh"
 #include "ggml-cuda/top-k-mask.cuh"
+#include "ggml-cuda/mhc-sinkhorn.cuh"
 #include "ggml.h"
 
 #include <algorithm>
@@ -2830,6 +2831,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 default:
                     return false;
             }
+            break;
+        case GGML_OP_MHC_SINKHORN2:
+            ggml_cuda_op_mhc_sinkhorn2(ctx, dst);
             break;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(dst)) {
@@ -6237,6 +6241,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 default:
                     return false;
             }
+        case GGML_OP_MHC_SINKHORN2:
+            return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
         case GGML_OP_GLU:
             switch (ggml_get_glu_op(op)) {
                 case GGML_GLU_OP_REGLU:
@@ -6269,7 +6275,16 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
                 }
                 const int cc_dev = ggml_cuda_info().devices[dev_ctx->device].cc;
-                const bool f32_src1_ok = GGML_CUDA_CC_IS_NVIDIA(cc_dev) && cc_dev < GGML_CUDA_CC_AMPERE;
+                // F32 x F32 with F32 activations: exact on pre-Ampere, and on any GPU when it runs in the FP32 vector
+                // kernel (mmvf, CUDA cores) rather than cuBLAS, whose handles use TF32 tensor-op math on Ampere+
+                static const bool f32_prec_mmvf_on = [] {
+                    const char * v = getenv("GGML_CUDA_F32_PREC_MMVF");   // "0": the old rule, for A/B checks
+                    return v == nullptr || v[0] != '0';
+                }();
+                const bool f32_src1_mmvf = f32_prec_mmvf_on && op->op == GGML_OP_MUL_MAT && a->type == GGML_TYPE_F32 &&
+                    b->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                    ggml_cuda_should_use_mmvf(a, cc_dev, ggml_cuda_info().devices[dev_ctx->device].warp_size, b->ne[1]);
+                const bool f32_src1_ok = (GGML_CUDA_CC_IS_NVIDIA(cc_dev) && cc_dev < GGML_CUDA_CC_AMPERE) || f32_src1_mmvf;
                 const enum ggml_prec prec_src1 = ggml_prec_get_src(op, 1);
                 const bool fp8_id_mmvf = op->op == GGML_OP_MUL_MAT_ID &&
                     a->type == GGML_TYPE_F8_E4M3 && b->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
